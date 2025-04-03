@@ -55,8 +55,10 @@ fn print_help(command: Option<&str>) {
             println!("  BPE_PATH  The path to a file that contains BPE grammar");
             println!("");
             println!("Options:");
-            println!("  -h, --help        Display concise help for this command");
-            println!("  -t, --max-tokens  The maximum number of tokens to generate");
+            println!("  -h, --help         Display concise help for this command");
+            println!("  -t, --max-tokens   The maximum number of tokens to generate");
+            println!("  -f, --freq-weight  The weight to apply to token randomisation based on the token frequency");
+            println!("  -i, --idx-weight   The weight to apply to token randomisation based on the token index (bigger = longer phrases)");
             println!("");
         }
         Some("parse") => {
@@ -93,13 +95,20 @@ fn main() -> Result<()> {
                 let (seed, bpe_path) = pos_args!("generate", args_iter, "seed", "bpe_path");
 
                 let mut max_token_count = 32;
+                let mut freq_weight = 1.0;
+                let mut idx_weight = 1.0;
                 flag_args!(
                     "generate",
                     args_iter,
-                    (max_token_count, "--max-tokens" | "-t")
+                    (max_token_count, "--max-tokens" | "-t"),
+                    (freq_weight, "--freq_weight" | "-f"),
+                    (idx_weight, "--idx_weight" | "-i")
                 );
 
-                println!("{}", generate_from_seed(seed, bpe_path, max_token_count)?);
+                println!(
+                    "{}",
+                    generate_from_seed(seed, bpe_path, max_token_count, freq_weight, idx_weight)?
+                );
             }
             "parse" | "p" => {
                 let (txt_path, bpe_path) = pos_args!("parse", args_iter, "txt_path", "bpe_path");

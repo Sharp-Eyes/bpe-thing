@@ -155,6 +155,8 @@ pub fn generate_gibberish(
     token: &Token,
     token_grammar: &TokenGrammar,
     depth: u32,
+    freq_weight: f32,
+    idx_weight: f32,
 ) -> Result<String> {
     let mut token = token.clone();
     let mut rng = rand::rng();
@@ -171,7 +173,9 @@ pub fn generate_gibberish(
             .iter()
             .map(|token| match token {
                 Token::Char(_) => 1,
-                Token::Pair(i) => token_grammar[*i as usize].2 + i, // frequency + index
+                Token::Pair(i) => ((token_grammar[*i as usize].2 as f32 * freq_weight)
+                    + (*i as f32) * idx_weight)
+                    .round() as u32, // frequency + index
             })
             .collect();
 
@@ -215,7 +219,7 @@ pub fn parse_bpe<P: AsRef<Path>>(
     let mut char_count = 0;
 
     // Input tokens to be encoded with BPE.
-    let mut tokens: Vec<Token> = data.chars().map(|c| Token::Char(c)).collect();
+    let mut tokens: Vec<Option<Token>> = data.chars().map(|c| Some(Token::Char(c))).collect();
 
     // Finalised token 'grammar' definition of (left-token, right-token, frequency).
     let mut token_grammar: TokenGrammar = vec![];
@@ -224,12 +228,16 @@ pub fn parse_bpe<P: AsRef<Path>>(
     let mut freqs: HashMap<(Token, Token), usize> = HashMap::new();
     for i in 0..tokens.len() - 1 {
         freqs
-            .entry((tokens[i].clone(), tokens[i + 1].clone()))
+            .entry((tokens[i].clone().unwrap(), tokens[i + 1].clone().unwrap()))
             .and_modify(|freq| *freq += 1)
             .or_insert(1);
     }
 
-    for _ in 0..max_token_count {
+    for iter in 0..max_token_count {
+        if iter != 0 && iter % 100 == 0 {
+            println!("Done {} iterations...", iter);
+        }
+
         let (max_pair, max_freq) = freqs
             .iter()
             .max_by(|(_, l_freq), (_, r_freq)| l_freq.cmp(r_freq))
@@ -243,38 +251,81 @@ pub fn parse_bpe<P: AsRef<Path>>(
         freqs.remove(&max_pair);
         token_grammar.push((max_pair.0.clone(), max_pair.1.clone(), max_freq as u32));
 
-        let mut i = 0;
-        while i < tokens.len() - 1 {
-            if max_pair.0 == tokens[i] && max_pair.1 == tokens[i + 1] {
-                // Replace most common pair bc at index i with new token Z: abcd -> aZd
-                tokens.push(Token::Pair(char_count)); // abcdZ
-                tokens.remove(i); // acdZ
-                tokens.swap_remove(i); // aZd
+        // Ensure that these always point at Some(Token) indices, e.g.:
+        //        aNNabcde    ab --> Z    aNNZNabcde
+        // prev:  ^               |          ^
+        // curr:     ^            |            ^
+        // next:       ^          |             ^
+        let mut prev_token_idx = 0;
+        let mut current_token_idx = 0;
+        let mut next_token_idx;
 
-                if i > 0 {
-                    // Decrement ac freq, increment aZ freq or create it if it does not exist.
-                    freqs
-                        .entry((tokens[i - 1].clone(), max_pair.0.clone()))
-                        .and_modify(|freq| *freq -= 1);
-                    freqs
-                        .entry((tokens[i - 1].clone(), Token::Pair(char_count)))
-                        .and_modify(|freq| *freq += 1)
-                        .or_insert(1);
-                }
-
-                if i < tokens.len() - 2 {
-                    // Decrement cd freq, increment Zd freq or create it if it does not exist.
-                    freqs
-                        .entry((max_pair.1.clone(), tokens[i + 1].clone()))
-                        .and_modify(|freq| *freq -= 1);
-                    freqs
-                        .entry((Token::Pair(char_count), tokens[i + 1].clone()))
-                        .and_modify(|freq| *freq += 1)
-                        .or_insert(1);
+        let mut i = 1;
+        'outer: while i < tokens.len() - 1 {
+            // Advance next_token_idx to next Some(Token) index.
+            while tokens[i].is_none() {
+                i += 1;
+                if i == tokens.len() {
+                    break 'outer;
                 }
             }
+            next_token_idx = i;
 
             i += 1;
+            if Some(&max_pair.0) == tokens[current_token_idx].as_ref()
+                && Some(&max_pair.1) == tokens[next_token_idx].as_ref()
+            {
+                // Replace most common pair bc at index i with new token Z and None: abcd -> aZNd
+                tokens[current_token_idx] = Some(Token::Pair(char_count));
+                tokens[next_token_idx] = None;
+
+                if prev_token_idx != current_token_idx {
+                    // Decrement ac freq, increment aZ freq or create it if it does not exist.
+                    freqs
+                        .entry((tokens[prev_token_idx].clone().unwrap(), max_pair.0.clone()))
+                        .and_modify(|freq| *freq -= 1);
+
+                    freqs
+                        .entry((
+                            tokens[prev_token_idx].clone().unwrap(),
+                            Token::Pair(char_count),
+                        ))
+                        .and_modify(|freq| *freq += 1)
+                        .or_insert(1);
+                }
+
+                prev_token_idx = current_token_idx;
+                // Advance current_token_idx to next Some(Token) index.
+                while tokens[i].is_none() {
+                    i += 1;
+                    if i == tokens.len() {
+                        break 'outer;
+                    }
+                }
+                current_token_idx = i;
+
+                if next_token_idx < tokens.len() {
+                    // Decrement cd freq, increment Zd freq or create it if it does not exist.
+                    freqs
+                        .entry((
+                            max_pair.1.clone(),                         // c
+                            tokens[current_token_idx].clone().unwrap(), // d
+                        ))
+                        .and_modify(|freq| *freq -= 1);
+
+                    freqs
+                        .entry((
+                            Token::Pair(char_count),                    // Z
+                            tokens[current_token_idx].clone().unwrap(), // d
+                        ))
+                        .and_modify(|freq| *freq += 1)
+                        .or_insert(1);
+                    i += 1;
+                }
+            } else {
+                prev_token_idx = current_token_idx;
+                current_token_idx = next_token_idx;
+            }
         }
 
         char_count += 1;
@@ -290,6 +341,8 @@ pub fn generate_from_seed<P: AsRef<Path>>(
     seed: String,
     bpe_path: P,
     max_token_count: u32,
+    freq_weight: f32,
+    idx_weight: f32,
 ) -> Result<String> {
     let token_grammar = load_tokens(bpe_path)?;
 
@@ -299,7 +352,13 @@ pub fn generate_from_seed<P: AsRef<Path>>(
     Ok(format!(
         "{}{}",
         tokens_to_string(&seed_token_iter.collect(), &token_grammar)?,
-        generate_gibberish(&last.unwrap(), &token_grammar, max_token_count)?
+        generate_gibberish(
+            &last.unwrap(),
+            &token_grammar,
+            max_token_count,
+            freq_weight,
+            idx_weight
+        )?
     ))
 }
 
