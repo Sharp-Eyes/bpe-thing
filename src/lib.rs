@@ -169,13 +169,17 @@ pub fn generate_gibberish(
             break;
         }
 
+        // Freq weight up -> biased toward shorter tokens,
+        // Idx weight up -> biased toward longer tokens.
+        #[rustfmt::skip]  // suck it
         let weights: Vec<u32> = valid_tokens
             .iter()
             .map(|token| match token {
                 Token::Char(_) => 1,
-                Token::Pair(i) => ((token_grammar[*i as usize].2 as f32 * freq_weight)
-                    + (*i as f32) * idx_weight)
-                    .round() as u32, // frequency + index
+                Token::Pair(i) => (
+                    (token_grammar[*i as usize].2 as f32) * freq_weight
+                    + (*i as f32) * idx_weight
+                ).round() as u32,
             })
             .collect();
 
@@ -251,88 +255,59 @@ pub fn parse_bpe<P: AsRef<Path>>(
         freqs.remove(&max_pair);
         token_grammar.push((max_pair.0.clone(), max_pair.1.clone(), max_freq as u32));
 
-        // Ensure that these always point at Some(Token) indices, e.g.:
-        //        aNNabcde    ab --> Z    aNNZNabcde
-        // prev:  ^               |          ^
-        // curr:     ^            |            ^
-        // next:       ^          |             ^
-        let mut prev_token_idx = 0;
-        let mut current_token_idx = 0;
-        let mut next_token_idx;
-
-        let mut i = 1;
-        'outer: while i < tokens.len() - 1 {
-            // Advance next_token_idx to next Some(Token) index.
-            while tokens[i].is_none() {
-                i += 1;
-                if i == tokens.len() {
-                    break 'outer;
-                }
-            }
-            next_token_idx = i;
-
-            i += 1;
-            if Some(&max_pair.0) == tokens[current_token_idx].as_ref()
-                && Some(&max_pair.1) == tokens[next_token_idx].as_ref()
+        let mut i = 0;
+        while i < tokens.len() - 1 {
+            if Some(&max_pair.0) == tokens[i].as_ref()
+                && Some(&max_pair.1) == tokens[i + 1].as_ref()
             {
-                // Replace most common pair bc at index i with new token Z and None: abcd -> aZNd
-                tokens[current_token_idx] = Some(Token::Pair(char_count));
-                tokens[next_token_idx] = None;
+                // Replace most common pair bc at index i with None and new token Z: abcd -> aNZd
+                // Z last to guarantee that we never encounter any N when doing a lookbehind at i-1.
+                tokens[i] = None;
+                tokens[i + 1] = Some(Token::Pair(char_count));
 
-                if prev_token_idx != current_token_idx {
-                    // Decrement ac freq, increment aZ freq or create it if it does not exist.
-                    freqs
-                        .entry((tokens[prev_token_idx].clone().unwrap(), max_pair.0.clone()))
-                        .and_modify(|freq| *freq -= 1);
-
+                // Decrement freqs ab and cd, increment freqs aZ and Zd.
+                if i >= 1 {
                     freqs
                         .entry((
-                            tokens[prev_token_idx].clone().unwrap(),
-                            Token::Pair(char_count),
-                        ))
-                        .and_modify(|freq| *freq += 1)
-                        .or_insert(1);
-                }
-
-                prev_token_idx = current_token_idx;
-                // Advance current_token_idx to next Some(Token) index.
-                while tokens[i].is_none() {
-                    i += 1;
-                    if i == tokens.len() {
-                        break 'outer;
-                    }
-                }
-                current_token_idx = i;
-
-                if next_token_idx < tokens.len() {
-                    // Decrement cd freq, increment Zd freq or create it if it does not exist.
-                    freqs
-                        .entry((
-                            max_pair.1.clone(),                         // c
-                            tokens[current_token_idx].clone().unwrap(), // d
+                            tokens[i - 1].clone().unwrap(), // a
+                            max_pair.0.clone(),             // b
                         ))
                         .and_modify(|freq| *freq -= 1);
 
                     freqs
                         .entry((
-                            Token::Pair(char_count),                    // Z
-                            tokens[current_token_idx].clone().unwrap(), // d
+                            tokens[i - 1].clone().unwrap(), // a
+                            Token::Pair(char_count),        // Z
                         ))
                         .and_modify(|freq| *freq += 1)
                         .or_insert(1);
-                    i += 1;
                 }
-            } else {
-                prev_token_idx = current_token_idx;
-                current_token_idx = next_token_idx;
+                if i + 2 < tokens.len() - 1 {
+                    freqs
+                        .entry((
+                            max_pair.1.clone(),             // c
+                            tokens[i + 2].clone().unwrap(), // d
+                        ))
+                        .and_modify(|freq| *freq -= 1);
+
+                    freqs
+                        .entry((
+                            Token::Pair(char_count),        // Z
+                            tokens[i + 2].clone().unwrap(), // d
+                        ))
+                        .and_modify(|freq| *freq += 1)
+                        .or_insert(1);
+                }
             }
+            i += 1;
         }
 
+        // Clear empty tokens to speed up lookup in next iteration.
+        tokens = tokens.into_iter().filter(|t| t.is_some()).collect();
         char_count += 1;
     }
 
     write_tokens(&token_grammar, bpe_path)?;
-
     Ok(token_grammar)
 }
 
